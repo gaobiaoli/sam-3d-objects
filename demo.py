@@ -7,7 +7,7 @@ from inference import Inference, load_image, load_single_mask
 
 # load model
 tag = "hf"
-config_path = f"checkpoints/{tag}/pipeline.yaml"
+config_path = f"../autodl-tmp/checkpoints/{tag}/pipeline.yaml"
 inference = Inference(config_path, compile=False)
 
 # load image (RGBA only, mask is embedded in the alpha channel)
@@ -17,6 +17,5 @@ mask = load_single_mask("notebook/images/shutterstock_stylish_kidsroom_164080656
 # run model
 output = inference(image, mask, seed=42)
 
-# export gaussian splat
-output["gs"].save_ply(f"splat.ply")
-print("Your reconstruction has been saved to splat.ply")
+
+output['glb'].export('demo.glb')
