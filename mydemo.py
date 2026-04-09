@@ -5,7 +5,9 @@ import sys
 sys.path.append("notebook")
 from inference import Inference, load_image, load_mask
 from pathlib import Path
-
+import json
+import torch
+import numpy as np
 
 def _to_list_1d(value, expected_len: int):
 	if isinstance(value, torch.Tensor):
@@ -25,7 +27,7 @@ inference = Inference(config_path, compile=False)
 
 # load image (RGBA only, mask is embedded in the alpha channel)
 image = load_image("demo/camera_5c2959c3089c4ac5a7c5c913cc0df78d_office_5_frame_41_domain_rgb.png")
-mask = load_mask("demo/camera_5c2959c3089c4ac5a7c5c913cc0df78d_office_5_frame_41_domain_rgb_mask_0.png", index=14)
+mask = load_mask("demo/camera_5c2959c3089c4ac5a7c5c913cc0df78d_office_5_frame_41_domain_rgb_mask_0.png")
 out_json = Path("demo/camera_5c2959c3089c4ac5a7c5c913cc0df78d_office_5_frame_41_domain_rgb_mask_0.json")
 out_glb = Path("demo/camera_5c2959c3089c4ac5a7c5c913cc0df78d_office_5_frame_41_domain_rgb_mask_0.glb")
 # run model
