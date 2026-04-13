@@ -345,8 +345,11 @@ async def infer(
             "X-Request-Id": stem,
         }
         if mask_path is not None:
-            extra_headers["X-Mask-File"] = str(mask_path)
-            extra_headers["X-Mask-Download"] = f"/results/{stem}/mask"
+            try:
+                mask_bytes = Path(mask_path).read_bytes()
+                extra_headers["X-Mask-Png-B64"] = base64.b64encode(mask_bytes).decode("ascii")
+            except Exception:
+                pass
 
         return FileResponse(
             path=str(glb_path),

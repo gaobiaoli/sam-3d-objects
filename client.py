@@ -1,6 +1,7 @@
 import base64
 import json
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -22,6 +23,7 @@ def run_test(
     depth_scale=1000.0,
     invalid_depth_value=65535.0,
     seed=42,
+    return_mask=False,
     output_dir=".",
 ) -> None:
     depth_file_obj = None
@@ -57,6 +59,8 @@ def run_test(
             data["K"] = json.dumps(_jsonable(K))
         if bbox is not None:
             data["bbox"] = json.dumps(_jsonable(bbox))
+            if return_mask:
+                data["return_mask"] = "true"
 
         try:
             resp = requests.post(url, files=files, data=data, timeout=600, stream=True)
@@ -95,7 +99,33 @@ def run_test(
             except Exception as exc:
                 print(f"Warning: failed to decode X-Pose-Json-B64: {exc}")
 
+        local_mask = None
+        mask_b64 = resp.headers.get("X-Mask-Png-B64")
+        if mask_b64:
+            try:
+                local_mask = output_folder / f"{request_key}_mask.png"
+                local_mask.write_bytes(base64.b64decode(mask_b64))
+                print(f"Saved Mask to: {local_mask.resolve()}")
+            except Exception as exc:
+                print(f"Warning: failed to decode X-Mask-Png-B64: {exc}")
+
+        if local_mask is None:
+            mask_download_path = resp.headers.get("X-Mask-Download")
+            if mask_download_path:
+                base_url = f"{urlsplit(url).scheme}://{urlsplit(url).netloc}"
+                mask_url = urljoin(base_url, mask_download_path)
+                mask_resp = requests.get(mask_url, timeout=120, stream=True)
+                if mask_resp.status_code == 200:
+                    local_mask = output_folder / f"{request_key}_mask.png"
+                    with local_mask.open("wb") as file_obj:
+                        for chunk in mask_resp.iter_content(chunk_size=8192):
+                            if chunk:
+                                file_obj.write(chunk)
+                    print(f"Saved Mask to: {local_mask.resolve()}")
+                else:
+                    print(f"Warning: failed to download mask: {mask_resp.status_code} {mask_resp.text}")
+
         print(f"Saved GLB to: {local_glb.resolve()}")
         print(f"Saved JSON to: {local_json.resolve()}")
 
-        return local_glb, local_json
+        return local_glb, local_json, local_mask
