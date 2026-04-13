@@ -1,7 +1,6 @@
 import base64
 import json
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -76,54 +75,33 @@ def run_test(
         output_folder = Path(output_dir)
         output_folder.mkdir(parents=True, exist_ok=True)
 
-        request_key = resp.headers.get("X-Request-Id") or request_id or "output"
+        request_key = request_id or "output"
         local_glb = output_folder / f"{request_key}.glb"
-        with local_glb.open("wb") as file_obj:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    file_obj.write(chunk)
-
-        poses_b64 = resp.headers.get("X-Pose-Json-B64")
         local_json = output_folder / f"{request_key}.json"
-        if poses_b64:
-            try:
-                pose_text = base64.b64decode(poses_b64).decode("utf-8")
-                try:
-                    pose_obj = json.loads(pose_text)
-                    local_json.write_text(
-                        json.dumps(pose_obj, indent=2, ensure_ascii=False),
-                        encoding="utf-8",
-                    )
-                except json.JSONDecodeError:
-                    local_json.write_text(pose_text, encoding="utf-8")
-            except Exception as exc:
-                print(f"Warning: failed to decode X-Pose-Json-B64: {exc}")
-
         local_mask = None
-        mask_b64 = resp.headers.get("X-Mask-Png-B64")
-        if mask_b64:
-            try:
-                local_mask = output_folder / f"{request_key}_mask.png"
-                local_mask.write_bytes(base64.b64decode(mask_b64))
-                print(f"Saved Mask to: {local_mask.resolve()}")
-            except Exception as exc:
-                print(f"Warning: failed to decode X-Mask-Png-B64: {exc}")
 
-        if local_mask is None:
-            mask_download_path = resp.headers.get("X-Mask-Download")
-            if mask_download_path:
-                base_url = f"{urlsplit(url).scheme}://{urlsplit(url).netloc}"
-                mask_url = urljoin(base_url, mask_download_path)
-                mask_resp = requests.get(mask_url, timeout=120, stream=True)
-                if mask_resp.status_code == 200:
-                    local_mask = output_folder / f"{request_key}_mask.png"
-                    with local_mask.open("wb") as file_obj:
-                        for chunk in mask_resp.iter_content(chunk_size=8192):
-                            if chunk:
-                                file_obj.write(chunk)
-                    print(f"Saved Mask to: {local_mask.resolve()}")
-                else:
-                    print(f"Warning: failed to download mask: {mask_resp.status_code} {mask_resp.text}")
+        payload = resp.json()
+        request_key = payload.get("request_id") or request_key
+        local_glb = output_folder / f"{request_key}.glb"
+        local_json = output_folder / f"{request_key}.json"
+
+        glb_b64 = payload.get("glb_b64")
+        if not glb_b64:
+            raise SystemExit("Request failed: JSON body missing glb_b64")
+        local_glb.write_bytes(base64.b64decode(glb_b64))
+
+        pose_obj = payload.get("pose")
+        if pose_obj is not None:
+            local_json.write_text(
+                json.dumps(pose_obj, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+        mask_b64 = payload.get("mask_png_b64")
+        if mask_b64:
+            local_mask = output_folder / f"{request_key}_mask.png"
+            local_mask.write_bytes(base64.b64decode(mask_b64))
+            print(f"Saved Mask to: {local_mask.resolve()}")
 
         print(f"Saved GLB to: {local_glb.resolve()}")
         print(f"Saved JSON to: {local_json.resolve()}")

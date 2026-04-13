@@ -9,7 +9,7 @@ Mask can be provided directly or generated from bbox using SAM model:
 - `bbox` as JSON string [x_min, y_min, x_max, y_max] (optional, used if mask not provided)
 
 Return mode:
-- return glb directly, and include json content in response header
+- always return JSON body with `glb_b64`, `pose`, optional `mask_png_b64`
 
 Depth support:
 - `depth_image` as depth image (`.png/.jpg/.jpeg/.tiff`)
@@ -337,26 +337,24 @@ async def infer(
             except Exception as exc:
                 raise HTTPException(status_code=500, detail=f"Failed to save generated mask: {exc}")
 
-        pose_json_text = json.dumps(pose_result, separators=(",", ":"))
-        pose_json_b64 = base64.b64encode(pose_json_text.encode("utf-8")).decode("ascii")
-        extra_headers = {
-            "X-Pose-Json-B64": pose_json_b64,
-            "X-Json-File": str(json_path),
-            "X-Request-Id": stem,
+        try:
+            glb_b64 = base64.b64encode(Path(glb_path).read_bytes()).decode("ascii")
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to encode glb for body response: {exc}")
+
+        response_payload = {
+            "request_id": stem,
+            "pose": pose_result,
+            "glb_b64": glb_b64,
         }
+
         if mask_path is not None:
             try:
-                mask_bytes = Path(mask_path).read_bytes()
-                extra_headers["X-Mask-Png-B64"] = base64.b64encode(mask_bytes).decode("ascii")
-            except Exception:
-                pass
+                response_payload["mask_png_b64"] = base64.b64encode(Path(mask_path).read_bytes()).decode("ascii")
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to encode mask for body response: {exc}")
 
-        return FileResponse(
-            path=str(glb_path),
-            media_type="model/gltf-binary",
-            filename=f"{stem}.glb",
-            headers=extra_headers,
-        )
+        return response_payload
 
 
 @app.post("/infer_sam")
