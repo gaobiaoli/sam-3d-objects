@@ -14,7 +14,8 @@ def _jsonable(value):
 def run_test(
     url,
     image_path,
-    mask_path,
+    mask_path=None,
+    bbox=None,
     depth_path=None,
     K=None,
     request_id=None,
@@ -24,10 +25,20 @@ def run_test(
     output_dir=".",
 ) -> None:
     depth_file_obj = None
+    mask_file_obj = None
     files = {}
-    with open(image_path, "rb") as image_file, open(mask_path, "rb") as mask_file:
+    with open(image_path, "rb") as image_file:
         files["image"] = (Path(image_path).name, image_file, "image/png")
-        files["mask"] = (Path(mask_path).name, mask_file, "image/png")
+
+        if mask_path is not None:
+            mask_path = Path(mask_path)
+            if not mask_path.exists():
+                raise FileNotFoundError(f"Missing mask file: {mask_path}")
+            mask_file_obj = mask_path.open("rb")
+            files["mask"] = (mask_path.name, mask_file_obj, "image/png")
+
+        if mask_path is None and bbox is None:
+            raise ValueError("Either mask_path or bbox must be provided")
 
         if depth_path is not None:
             depth_path = Path(depth_path)
@@ -44,12 +55,16 @@ def run_test(
         }
         if K is not None:
             data["K"] = json.dumps(_jsonable(K))
+        if bbox is not None:
+            data["bbox"] = json.dumps(_jsonable(bbox))
 
         try:
             resp = requests.post(url, files=files, data=data, timeout=600, stream=True)
         finally:
             if depth_file_obj is not None:
                 depth_file_obj.close()
+            if mask_file_obj is not None:
+                mask_file_obj.close()
 
         if resp.status_code != 200:
             raise SystemExit(f"Request failed: {resp.status_code} {resp.text}")

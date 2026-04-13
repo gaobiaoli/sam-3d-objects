@@ -1,8 +1,12 @@
 """FastAPI service for SAM 3D Objects inference.
 
-POST /infer accepts image+mask and optional depth/pointmap, then saves both:
+POST /infer accepts image+optional mask and optional depth/pointmap, then saves both:
 - <request_id>.glb
 - <request_id>.json (pose)
+
+Mask can be provided directly or generated from bbox using SAM model:
+- `mask` as binary/alpha mask image (optional)
+- `bbox` as JSON string [x_min, y_min, x_max, y_max] (optional, used if mask not provided)
 
 Return mode:
 - return glb directly, and include json content in response header
@@ -43,11 +47,35 @@ def _load_local_inference_symbols() -> tuple[Any, Any, Any]:
     return module.Inference, module.load_image, module.load_mask
 
 
+def _load_sam_model():
+    """Load SAM model for mask generation from bbox."""
+    try:
+        from segment_anything import sam_model_registry, SamPredictor
+        
+        model_type = os.environ.get("SAM_MODEL_TYPE", "vit_h")
+        checkpoint_path = os.environ.get(
+            "SAM_CHECKPOINT_PATH",
+            "/root/sam-3d-objects/sam_vit_h_4b8939.pth"
+        )
+        
+        if not os.path.exists(checkpoint_path):
+            raise RuntimeError(f"SAM checkpoint not found at: {checkpoint_path}")
+        
+        sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        sam.to(device)
+        predictor = SamPredictor(sam)
+        return predictor
+    except ImportError:
+        raise RuntimeError("segment_anything not installed. Install it to use bbox-based mask generation.")
+
+
 Inference, load_image, load_mask = _load_local_inference_symbols()
 
 app = FastAPI(title="SAM 3D Objects Inference API")
 
 inference_instance: Optional[Any] = None
+sam_model: Optional[Any] = None
 
 
 def _output_dir() -> Path:
@@ -59,6 +87,11 @@ def _output_dir() -> Path:
 def _result_paths(request_id: str) -> tuple[Path, Path]:
     output_dir = _output_dir()
     return output_dir / f"{request_id}.glb", output_dir / f"{request_id}.json"
+
+
+def _result_mask_path(request_id: str) -> Path:
+    output_dir = _output_dir()
+    return output_dir / f"{request_id}_mask.png"
 
 
 def _to_list_1d(value: Any, expected_len: int) -> list[float]:
@@ -134,6 +167,42 @@ def _depth_to_pointmap(
     return torch.from_numpy(pointmap)
 
 
+def _parse_bbox(bbox_text: Optional[str]) -> Optional[list[float]]:
+    """Parse bbox from JSON string format [x_min, y_min, x_max, y_max]."""
+    if not bbox_text:
+        return None
+    
+    try:
+        bbox = json.loads(bbox_text)
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            raise ValueError("bbox must have exactly 4 values")
+        return [float(v) for v in bbox]
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid bbox: {exc}")
+
+
+def _generate_mask_from_bbox(image: np.ndarray, bbox: list[float]) -> np.ndarray:
+    """Generate mask from bbox using SAM model."""
+    global sam_model
+    if sam_model is None:
+        raise HTTPException(status_code=500, detail="SAM model not initialized")
+    
+    x_min, y_min, x_max, y_max = bbox
+    input_box = np.array([[x_min, y_min, x_max, y_max]])
+    
+    try:
+        sam_model.set_image(image)
+        masks, _, _ = sam_model.predict(
+            box=input_box,
+            multimask_output=False,
+        )
+        # masks shape: (1, H, W) for single mask
+        mask = masks[0].astype(bool)
+        return mask
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"SAM inference error: {exc}")
+
+
 def get_inference() -> Any:
     global inference_instance
     if inference_instance is None:
@@ -149,13 +218,22 @@ def get_inference() -> Any:
 
 @app.on_event("startup")
 async def _warmup_model() -> None:
+    global sam_model
     get_inference()
+    # Initialize SAM model
+    try:
+        sam_model = _load_sam_model()
+    except Exception as exc:
+        print(f"Warning: SAM model initialization failed: {exc}")
+        print("Bbox-based mask generation will not be available")
 
 
 @app.post("/infer")
 async def infer(
     image: UploadFile = File(..., description="RGB image"),
-    mask: UploadFile = File(..., description="Binary/alpha mask"),
+    mask: Optional[UploadFile] = File(None, description="Optional binary/alpha mask image"),
+    bbox: Optional[str] = Form(None, description="Optional bbox as JSON [x_min, y_min, x_max, y_max]"),
+    return_mask: bool = Form(False, description="If true and using bbox, return generated mask info"),
     depth_image: Optional[UploadFile] = File(None, description="Optional depth image file"),
     K: Optional[str] = Form(None, description="Optional 3x3 intrinsics JSON string"),
     depth_scale: float = Form(512.0),
@@ -165,21 +243,45 @@ async def infer(
 ):
     with tempfile.TemporaryDirectory() as tmpdir:
         image_path = os.path.join(tmpdir, image.filename or "image.png")
-        mask_path = os.path.join(tmpdir, mask.filename or "mask.png")
 
         try:
             with open(image_path, "wb") as file_obj:
                 file_obj.write(await image.read())
-            with open(mask_path, "wb") as file_obj:
-                file_obj.write(await mask.read())
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Failed to save uploads: {exc}")
+            raise HTTPException(status_code=500, detail=f"Failed to save image: {exc}")
 
         try:
             img_np = load_image(image_path)
-            mask_np = load_mask(mask_path)
         except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"Failed to load image/mask: {exc}")
+            raise HTTPException(status_code=400, detail=f"Failed to load image: {exc}")
+
+        # Load or generate mask
+        mask_np = None
+        mask_generated_from_bbox = False
+        if mask is not None:
+            # Mask file provided directly
+            mask_path = os.path.join(tmpdir, mask.filename or "mask.png")
+            try:
+                with open(mask_path, "wb") as file_obj:
+                    file_obj.write(await mask.read())
+                mask_np = load_mask(mask_path)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Failed to load mask: {exc}")
+        elif bbox is not None:
+            # Generate mask from bbox using SAM
+            bbox_list = _parse_bbox(bbox)
+            try:
+                mask_np = _generate_mask_from_bbox(img_np, bbox_list)
+                mask_generated_from_bbox = True
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to generate mask from bbox: {exc}")
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Either 'mask' file or 'bbox' parameter must be provided"
+            )
 
         pointmap_tensor = None
         if depth_image is not None:
@@ -226,17 +328,82 @@ async def infer(
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Failed to save outputs: {exc}")
 
+        mask_path = None
+        if return_mask and mask_generated_from_bbox and mask_np is not None:
+            mask_path = _result_mask_path(stem)
+            mask_uint8 = (mask_np.astype(np.uint8) * 255)
+            try:
+                iio.imwrite(str(mask_path), mask_uint8)
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to save generated mask: {exc}")
+
         pose_json_text = json.dumps(pose_result, separators=(",", ":"))
         pose_json_b64 = base64.b64encode(pose_json_text.encode("utf-8")).decode("ascii")
+        extra_headers = {
+            "X-Pose-Json-B64": pose_json_b64,
+            "X-Json-File": str(json_path),
+            "X-Request-Id": stem,
+        }
+        if mask_path is not None:
+            extra_headers["X-Mask-File"] = str(mask_path)
+            extra_headers["X-Mask-Download"] = f"/results/{stem}/mask"
+
         return FileResponse(
             path=str(glb_path),
             media_type="model/gltf-binary",
             filename=f"{stem}.glb",
-            headers={
-                "X-Pose-Json-B64": pose_json_b64,
-                "X-Json-File": str(json_path),
-                "X-Request-Id": stem,
-            },
+            headers=extra_headers,
+        )
+
+
+@app.post("/infer_sam")
+async def infer_sam(
+    image: UploadFile = File(..., description="RGB image"),
+    bbox: str = Form(..., description="Bbox as JSON [x_min, y_min, x_max, y_max]"),
+):
+    """Generate mask from image and bbox using SAM model.
+    
+    Args:
+        image: RGB image file
+        bbox: Bbox as JSON string [x_min, y_min, x_max, y_max]
+    
+    Returns:
+        PNG mask image
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, image.filename or "image.png")
+
+        try:
+            with open(image_path, "wb") as file_obj:
+                file_obj.write(await image.read())
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to save image: {exc}")
+
+        try:
+            img_np = load_image(image_path)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to load image: {exc}")
+
+        # Parse and validate bbox
+        bbox_list = _parse_bbox(bbox)
+        
+        try:
+            mask_np = _generate_mask_from_bbox(img_np, bbox_list)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to generate mask from bbox: {exc}")
+
+        # Convert mask to PNG image and return
+        mask_uint8 = (mask_np.astype(np.uint8) * 255)
+        mask_png_bytes = BytesIO()
+        iio.imwrite(mask_png_bytes, mask_uint8, extension=".png")
+        mask_png_bytes.seek(0)
+
+        return FileResponse(
+            content=mask_png_bytes.getvalue(),
+            media_type="image/png",
+            filename="mask.png",
         )
 
 
@@ -261,6 +428,18 @@ async def download_json(request_id: str):
         path=str(json_path),
         media_type="application/json",
         filename=f"{request_id}.json",
+    )
+
+
+@app.get("/results/{request_id}/mask")
+async def download_mask(request_id: str):
+    mask_path = _result_mask_path(request_id)
+    if not mask_path.exists():
+        raise HTTPException(status_code=404, detail=f"Mask not found for request_id={request_id}")
+    return FileResponse(
+        path=str(mask_path),
+        media_type="image/png",
+        filename=f"{request_id}_mask.png",
     )
 
 
