@@ -31,7 +31,7 @@ import torch
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-
+from utils import build_o3d_transform_from_p3d, load_pose_json, quat_wxyz_to_rotmat, transform2pose, pose2transform
 
 def _load_local_inference_symbols() -> tuple[Any, Any, Any]:
     inference_py = Path(__file__).resolve().parent / "notebook" / "inference.py"
@@ -115,6 +115,60 @@ def _extract_pose_json(output: dict) -> dict:
             "rotation": _to_list_1d(output["rotation"], 4),
         }
     }
+
+
+def _delta_pose_to_json(delta_pose: dict) -> dict:
+    return {
+        "object_0": {
+            "scale": np.asarray(delta_pose["scale"], dtype=np.float32).reshape(3).tolist(),
+            "translation": np.asarray(delta_pose["translation"], dtype=np.float32).reshape(3).tolist(),
+            "rotation": np.asarray(delta_pose["rotation_wxyz"], dtype=np.float32).reshape(4).tolist(),
+        }
+    }
+
+
+def _run_pose_optimization(
+    mesh: Any,
+    pointmap_tensor: torch.Tensor,
+    mask_np: np.ndarray,
+    base_pose_json: dict,
+    optimize_num_iterations: int,
+) -> dict:
+    try:
+        from pose_optimizer import optimize_pose_from_loaded_mesh
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to import pose optimizer: {exc}")
+
+    if optimize_num_iterations <= 0:
+        raise HTTPException(status_code=400, detail="optimize_num_iterations must be > 0")
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as mask_file:
+        mask_uint8 = (mask_np.astype(np.uint8) * 255)
+        iio.imwrite(mask_file.name, mask_uint8)
+
+        point_map_np = pointmap_tensor.detach().cpu().numpy().astype(np.float32)
+        base_transform = build_o3d_transform_from_p3d(
+            quat_wxyz=base_pose_json["object_0"]["rotation"],
+            translation=base_pose_json["object_0"]["translation"],
+            scale=base_pose_json["object_0"]["scale"],
+            for_glb=True,
+        )
+
+        try:
+            optimize_result = optimize_pose_from_loaded_mesh(
+                glb_mesh=mesh,
+                point_map=point_map_np,
+                mask_path=mask_file.name,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                optimize_scale=True,
+                trim_ratio=0.9,
+                num_iterations=optimize_num_iterations,
+                base_transform=base_transform,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Pose optimization failed: {exc}")
+
+    return _delta_pose_to_json(optimize_result["delta_pose"])
 
 
 def _parse_k_matrix(k_text: Optional[str]) -> Optional[np.ndarray]:
@@ -234,10 +288,14 @@ async def infer(
     mask: Optional[UploadFile] = File(None, description="Optional binary/alpha mask image"),
     bbox: Optional[str] = Form(None, description="Optional bbox as JSON [x_min, y_min, x_max, y_max]"),
     return_mask: bool = Form(False, description="If true and using bbox, return generated mask info"),
+    just_return_mask: bool = Form(False, description="If true, only return the generated mask from bbox without running inference"),
     depth_image: Optional[UploadFile] = File(None, description="Optional depth image file"),
     K: Optional[str] = Form(None, description="Optional 3x3 intrinsics JSON string"),
+    use_depth: bool = Form(False, description="If true, use depth image and K for pointmap generation"),
     depth_scale: float = Form(512.0),
     invalid_depth_value: Optional[float] = Form(65535.0),
+    optimize_pose: bool = Form(False, description="If true, run pointmap+mask pose optimization"),
+    optimize_num_iterations: int = Form(300, description="Pose optimizer iterations"),
     request_id: Optional[str] = Form(None),
     seed: int = Form(42),
 ):
@@ -282,6 +340,19 @@ async def infer(
                 status_code=400,
                 detail="Either 'mask' file or 'bbox' parameter must be provided"
             )
+        if just_return_mask:
+            if mask_np is None:
+                raise HTTPException(status_code=500, detail="Mask generation failed, no mask to return")
+            response_payload = {
+                "request_id": request_id or (Path(image.filename or "mask").stem or "mask"),
+            }
+            if return_mask and mask_generated_from_bbox:
+                mask_png_bytes = BytesIO()
+                mask_uint8 = (mask_np.astype(np.uint8) * 255)
+                iio.imwrite(mask_png_bytes, mask_uint8, extension=".png")
+                mask_png_bytes.seek(0)
+                response_payload["mask_png_b64"] = base64.b64encode(mask_png_bytes.getvalue()).decode("ascii")
+            return response_payload
 
         pointmap_tensor = None
         if depth_image is not None:
@@ -306,7 +377,10 @@ async def infer(
             )
 
         try:
-            output = get_inference()(img_np, mask_np, seed=seed, pointmap=pointmap_tensor)
+            if use_depth:
+                output = get_inference()(img_np, mask_np, seed=seed, pointmap=pointmap_tensor)
+            else:
+                output = get_inference()(img_np, mask_np, seed=seed)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Inference error: {exc}")
 
@@ -318,6 +392,27 @@ async def infer(
             pose_result = _extract_pose_json(output)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Failed to extract pose json: {exc}")
+
+        pose_initial = pose_result
+        if optimize_pose:
+            if pointmap_tensor is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="optimize_pose=true requires `depth_image` and valid `K`",
+                )
+            if mask_np is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="optimize_pose=true requires a valid mask",
+                )
+
+            pose_result = _run_pose_optimization(
+                mesh=mesh,
+                pointmap_tensor=pointmap_tensor,
+                mask_np=mask_np,
+                base_pose_json=pose_initial,
+                optimize_num_iterations=optimize_num_iterations,
+            )
 
         stem = request_id or (Path(image.filename or "output").stem or "output")
         glb_path, json_path = _result_paths(stem)
@@ -341,6 +436,8 @@ async def infer(
             glb_b64 = base64.b64encode(Path(glb_path).read_bytes()).decode("ascii")
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Failed to encode glb for body response: {exc}")
+        
+        
 
         response_payload = {
             "request_id": stem,
@@ -348,12 +445,20 @@ async def infer(
             "glb_b64": glb_b64,
         }
 
+        if optimize_pose:
+            response_payload["pose_optimized"] = pose_result
+
         if mask_path is not None:
             try:
                 response_payload["mask_png_b64"] = base64.b64encode(Path(mask_path).read_bytes()).decode("ascii")
             except Exception as exc:
                 raise HTTPException(status_code=500, detail=f"Failed to encode mask for body response: {exc}")
-
+            
+        os.remove(image_path)
+        if json_path is not None:
+            os.remove(json_path)
+        if glb_path is not None:
+            os.remove(glb_path)
         return response_payload
 
 
