@@ -32,6 +32,12 @@ import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from utils import build_o3d_transform_from_p3d, load_pose_json, quat_wxyz_to_rotmat, transform2pose, pose2transform
+from loguru import logger
+import sys
+
+# Silence loguru INFO logs (used inside sam3d_objects.*)
+logger.remove()
+logger.add(sys.stderr, level=os.environ.get("LOGURU_LEVEL", "WARNING"))
 
 def _load_local_inference_symbols() -> tuple[Any, Any, Any]:
     inference_py = Path(__file__).resolve().parent / "notebook" / "inference.py"
@@ -133,27 +139,25 @@ def _run_pose_optimization(
     mask_np: np.ndarray,
     base_pose_json: dict,
     optimize_num_iterations: int,
+    Rt: np.ndarray = None,
 ) -> dict:
     try:
         from pose_optimizer import optimize_pose_from_loaded_mesh
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to import pose optimizer: {exc}")
 
-    if optimize_num_iterations <= 0:
-        raise HTTPException(status_code=400, detail="optimize_num_iterations must be > 0")
-
     with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as mask_file:
         mask_uint8 = (mask_np.astype(np.uint8) * 255)
         iio.imwrite(mask_file.name, mask_uint8)
 
-        point_map_np = pointmap_tensor.detach().cpu().numpy().astype(np.float32)
+        point_map_np = process_pointmap_for_optimization(pointmap_tensor)
         base_transform = build_o3d_transform_from_p3d(
-            quat_wxyz=base_pose_json["object_0"]["rotation"],
-            translation=base_pose_json["object_0"]["translation"],
-            scale=base_pose_json["object_0"]["scale"],
+            quat_wxyz=np.array(base_pose_json["object_0"]["rotation"]),
+            translation=np.array(base_pose_json["object_0"]["translation"]),
+            scale=np.array(base_pose_json["object_0"]["scale"]),
             for_glb=True,
         )
-
+        print("Base transform for optimization:", base_transform)
         try:
             optimize_result = optimize_pose_from_loaded_mesh(
                 glb_mesh=mesh,
@@ -164,6 +168,7 @@ def _run_pose_optimization(
                 trim_ratio=0.9,
                 num_iterations=optimize_num_iterations,
                 base_transform=base_transform,
+                K=Rt
             )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Pose optimization failed: {exc}")
@@ -208,7 +213,7 @@ def _depth_to_pointmap(
     h, w = depth.shape
     fx, fy = k_matrix[0, 0], k_matrix[1, 1]
     cx, cy = k_matrix[0, 2], k_matrix[1, 2]
-
+    # print(f"Depth image shape: {depth.shape}, fx: {fx}, fy: {fy}, cx: {cx}, cy: {cy}")
     u = np.arange(w, dtype=np.float32)
     v = np.arange(h, dtype=np.float32)
     uu, vv = np.meshgrid(u, v)
@@ -219,6 +224,22 @@ def _depth_to_pointmap(
 
     pointmap = np.stack([-x, -y, z], axis=-1).astype(np.float32)
     return torch.from_numpy(pointmap)
+
+def process_pointmap_for_optimization(pointmap: torch.Tensor) -> np.ndarray:
+    pointmap_np = pointmap.detach().cpu().numpy()
+    h,w = pointmap_np.shape[:2]
+    # 将depth=nan的点 置换为 0，0，0
+    z = pointmap_np[..., 2]
+    x = pointmap_np[..., 0]
+    y = pointmap_np[..., 1]
+    valid = np.isfinite(z)
+    x[~valid] = 0.0
+    y[~valid] = 0.0
+    z[~valid] = 0.0
+    # axis transformation
+    pointmap_np = np.stack([-x, -y, z], axis=-1).astype(np.float32)
+    return pointmap_np
+
 
 
 def _parse_bbox(bbox_text: Optional[str]) -> Optional[list[float]]:
@@ -291,6 +312,7 @@ async def infer(
     just_return_mask: bool = Form(False, description="If true, only return the generated mask from bbox without running inference"),
     depth_image: Optional[UploadFile] = File(None, description="Optional depth image file"),
     K: Optional[str] = Form(None, description="Optional 3x3 intrinsics JSON string"),
+    Rt: Optional[str] = Form(None, description="Optional 4x4 camera pose Rt matrix as JSON string"),
     use_depth: bool = Form(False, description="If true, use depth image and K for pointmap generation"),
     depth_scale: float = Form(512.0),
     invalid_depth_value: Optional[float] = Form(65535.0),
@@ -312,6 +334,8 @@ async def infer(
             img_np = load_image(image_path)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Failed to load image: {exc}")
+
+        logger.info(f"Request id: {request_id}, image shape: {img_np.shape}, mask provided: {mask is not None}, bbox provided: {bbox is not None}, depth provided: {depth_image is not None}")
 
         # Load or generate mask
         mask_np = None
@@ -376,8 +400,10 @@ async def infer(
                 invalid_depth_value=invalid_depth_value,
             )
 
+
         try:
             if use_depth:
+                logger.info(f"Running inference with depth support, pointmap shape: {pointmap_tensor.shape if pointmap_tensor is not None else None}")
                 output = get_inference()(img_np, mask_np, seed=seed, pointmap=pointmap_tensor)
             else:
                 output = get_inference()(img_np, mask_np, seed=seed)
@@ -405,13 +431,23 @@ async def infer(
                     status_code=400,
                     detail="optimize_pose=true requires a valid mask",
                 )
-
-            pose_result = _run_pose_optimization(
+            # 读取Rt
+            if Rt is not None:
+                try:
+                    Rt_matrix = np.asarray(json.loads(Rt), dtype=np.float32)
+                    if Rt_matrix.shape != (4, 4):
+                        raise ValueError(f"Rt must be 4x4 matrix, got shape {Rt_matrix.shape}")
+                except Exception as exc:
+                    raise HTTPException(status_code=400, detail=f"Invalid Rt: {exc}")
+            else:
+                Rt_matrix = None
+            pose_result_optimized = _run_pose_optimization(
                 mesh=mesh,
                 pointmap_tensor=pointmap_tensor,
                 mask_np=mask_np,
                 base_pose_json=pose_initial,
                 optimize_num_iterations=optimize_num_iterations,
+                Rt=Rt_matrix
             )
 
         stem = request_id or (Path(image.filename or "output").stem or "output")
@@ -446,7 +482,7 @@ async def infer(
         }
 
         if optimize_pose:
-            response_payload["pose_optimized"] = pose_result
+            response_payload["pose_optimized"] = pose_result_optimized
 
         if mask_path is not None:
             try:

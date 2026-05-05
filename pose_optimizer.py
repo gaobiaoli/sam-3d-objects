@@ -273,7 +273,7 @@ class delta_pose_optimizer:
         desired_scale = torch.min(ratios)
         desired_log_scale = torch.log(torch.clamp(desired_scale, min=1e-6))
 
-        return 0.01 * ((self.log_scale - desired_log_scale) ** 2)
+        return 0.1 * ((self.log_scale - desired_log_scale) ** 2)
     
     def compute_loss(self):
         cd = self.one_sided_trimmed_cd()
@@ -481,9 +481,6 @@ def optimize_pose_from_loaded_mesh(
 
     delta_pose = optimizer.get_delta_pose()
     # refined_mesh = apply_delta_to_mesh(glb_mesh, delta_pose)
-    transform = pose2transform(delta_pose["rotation_wxyz"], delta_pose["translation"], delta_pose["scale"])
-    
-    transform = pose2transform(delta_pose["rotation_wxyz"], delta_pose["translation"], delta_pose["scale"])
     refined_source_points = sample_source_points_from_mesh(raw_glb, num_points=min(source_num_points, 10000))
     refined_center = refined_source_points.mean(axis=0)
     print("refined source center:", refined_center)

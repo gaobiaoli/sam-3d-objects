@@ -2,6 +2,7 @@ import base64
 import json
 from pathlib import Path
 
+import numpy as np
 import requests
 
 
@@ -11,6 +12,41 @@ def _jsonable(value):
     return value
 
 
+def run_sam(
+    url,
+    image_path,
+    bbox,
+    request_id=None,
+    output_dir=".",
+    ):
+    output_folder = Path(output_dir)
+    output_folder.mkdir(parents=True, exist_ok=True)
+    request_key = request_id or "output"
+    with open(image_path, "rb") as image_file:
+        files = {
+            "image": (Path(image_path).name, image_file, "image/png"),
+        }
+        data = {
+            "bbox": json.dumps(_jsonable(bbox)),
+            "just_return_mask": "true",
+            "return_mask": "true",
+        }
+        resp = requests.post(url, files=files, data=data)
+        if resp.status_code != 200:
+            raise SystemExit(f"Request failed: {resp.status_code} {resp.text}")
+        payload = resp.json()
+        mask_b64 = payload.get("mask_png_b64")
+        if not mask_b64:
+            raise SystemExit("Request failed: JSON body missing mask_png_b64")
+        mask_b64 = payload.get("mask_png_b64")
+        if mask_b64:
+            local_mask = output_folder / f"{request_key}_mask.png"
+            local_mask.write_bytes(base64.b64decode(mask_b64))
+        print(f"Saved Mask to: {local_mask.resolve()}")
+        return local_mask
+    
+
+
 def run_test(
     url,
     image_path,
@@ -18,11 +54,14 @@ def run_test(
     bbox=None,
     depth_path=None,
     K=None,
+    Rt=None,
     request_id=None,
-    depth_scale=1000.0,
+    depth_scale=512.0,
     invalid_depth_value=65535.0,
     seed=42,
     return_mask=False,
+    post_process=False,
+    optimize_num_iterations=300,
     output_dir=".",
 ) -> None:
     depth_file_obj = None
@@ -56,11 +95,18 @@ def run_test(
         }
         if K is not None:
             data["K"] = json.dumps(_jsonable(K))
+        if Rt is not None:
+            rt_array = np.asarray(Rt)
+            if rt_array.shape != (4, 4):
+                raise ValueError(f"Rt must be a 4x4 ndarray-like value, got shape {rt_array.shape}")
+            data["Rt"] = json.dumps(_jsonable(rt_array))
         if bbox is not None:
             data["bbox"] = json.dumps(_jsonable(bbox))
             if return_mask:
                 data["return_mask"] = "true"
-
+        if post_process:
+            data["optimize_pose"] = "true"
+            data["optimize_num_iterations"] =  optimize_num_iterations
         try:
             resp = requests.post(url, files=files, data=data, timeout=600, stream=True)
         finally:
@@ -96,6 +142,13 @@ def run_test(
                 json.dumps(pose_obj, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
+        pose_optimized_obj = payload.get("pose_optimized")
+        if pose_optimized_obj is not None:
+            local_opti_json = output_folder / f"{request_key}_optimized.json"
+            local_opti_json.write_text(
+                json.dumps(pose_optimized_obj, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
 
         mask_b64 = payload.get("mask_png_b64")
         if mask_b64:
@@ -107,3 +160,6 @@ def run_test(
         print(f"Saved JSON to: {local_json.resolve()}")
 
         return local_glb, local_json, local_mask
+
+if __name__ == "__main__":
+    pass
