@@ -140,6 +140,8 @@ def _run_pose_optimization(
     base_pose_json: dict,
     optimize_num_iterations: int,
     Rt: np.ndarray = None,
+    iou_loss: bool = False,
+    intrinsics: np.ndarray = None,
 ) -> dict:
     try:
         from pose_optimizer import optimize_pose_from_loaded_mesh
@@ -165,10 +167,13 @@ def _run_pose_optimization(
                 mask_path=mask_file.name,
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 optimize_scale=True,
+                # trim_ratio=0.9,
                 trim_ratio=0.9,
                 num_iterations=optimize_num_iterations,
                 base_transform=base_transform,
-                K=Rt
+                K=Rt, 
+                intrinsics = intrinsics,
+                iou_loss=iou_loss,
             )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Pose optimization failed: {exc}")
@@ -317,6 +322,7 @@ async def infer(
     depth_scale: float = Form(512.0),
     invalid_depth_value: Optional[float] = Form(65535.0),
     optimize_pose: bool = Form(False, description="If true, run pointmap+mask pose optimization"),
+    iou_loss: bool = Form(True, description="If true, run pointmap+mask pose optimization"),
     optimize_num_iterations: int = Form(300, description="Pose optimizer iterations"),
     request_id: Optional[str] = Form(None),
     seed: int = Form(42),
@@ -447,7 +453,9 @@ async def infer(
                 mask_np=mask_np,
                 base_pose_json=pose_initial,
                 optimize_num_iterations=optimize_num_iterations,
-                Rt=Rt_matrix
+                Rt=Rt_matrix,
+                iou_loss=iou_loss,
+                intrinsics=k_matrix,
             )
 
         stem = request_id or (Path(image.filename or "output").stem or "output")
@@ -483,6 +491,8 @@ async def infer(
 
         if optimize_pose:
             response_payload["pose_optimized"] = pose_result_optimized
+            optimized_json_path = json_path.with_name(f"{json_path.stem}_optimized.json")
+            optimized_json_path.write_text(json.dumps(pose_result_optimized, indent=2), encoding="utf-8")
 
         if mask_path is not None:
             try:
@@ -490,11 +500,11 @@ async def infer(
             except Exception as exc:
                 raise HTTPException(status_code=500, detail=f"Failed to encode mask for body response: {exc}")
             
-        os.remove(image_path)
-        if json_path is not None:
-            os.remove(json_path)
-        if glb_path is not None:
-            os.remove(glb_path)
+        # os.remove(image_path)
+        # if json_path is not None:
+        #     os.remove(json_path)
+        # if glb_path is not None:
+        #     os.remove(glb_path)
         return response_payload
 
 
