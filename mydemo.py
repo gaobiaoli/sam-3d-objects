@@ -29,9 +29,9 @@ inference = Inference(config_path, compile=False)
 image = load_image("demo/camera_5c2959c3089c4ac5a7c5c913cc0df78d_office_5_frame_41_domain_rgb.png")
 mask = load_mask("demo/camera_5c2959c3089c4ac5a7c5c913cc0df78d_office_5_frame_41_domain_rgb_mask_0.png")
 out_json = Path("demo/camera_5c2959c3089c4ac5a7c5c913cc0df78d_office_5_frame_41_domain_rgb_mask_0.json")
-out_glb = Path("demo/camera_5c2959c3089c4ac5a7c5c913cc0df78d_office_5_frame_41_domain_rgb_mask_0.glb")
+out_glb = Path("demo/camera_5c2959c3089c4ac5a7c5c913cc0df78d_office_5_frame_41_domain_rgb_mask_0_with_texture.glb")
 # run model
-output = inference(image, mask, seed=42)
+output = inference(image, mask, seed=42, with_texture=True)
 
 
 # save

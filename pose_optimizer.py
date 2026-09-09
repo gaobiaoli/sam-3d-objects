@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 import copy
 import numpy as np
@@ -837,7 +838,7 @@ class delta_pose_optimizer:
                 if iou_loss is not None:
                     msg += f" | iou_loss={iou_loss.item():.6f} | iou_w={iou_weight:.4f}"
                 print(msg)
-
+        self.final_iou = iou_val
         return history
 
     def get_delta_pose(self):
@@ -854,6 +855,7 @@ class delta_pose_optimizer:
             "scale": scale,
             "rotation_wxyz": quat.astype(np.float32),
             "translation": trans.astype(np.float32),
+            "final_iou": self.final_iou,
         }
 
 def quat_wxyz_to_rotmat(qwxyz):

@@ -77,3 +77,66 @@ def load_pose_json(pose_json: Path, object_key: str = "object_0"):
 		raise ValueError(f"scale must be scalar or 3 values, got shape={scale.shape}")
 
 	return quat, trans, scale
+
+
+import numpy as np
+from scipy.spatial.transform import Rotation
+
+
+def quaternion_rotation_change_xyz(
+    quat: np.ndarray,
+    init_quat: np.ndarray,
+    degrees: bool = True,
+) -> np.ndarray:
+    """
+    计算当前姿态相对于初始姿态的 XYZ 欧拉角变化。
+
+    Parameters
+    ----------
+    quat:
+        当前四元数，顺序为 [w, x, y, z]。
+    init_quat:
+        初始四元数，顺序为 [w, x, y, z]。
+    degrees:
+        True 返回角度，False 返回弧度。
+
+    Returns
+    -------
+    np.ndarray
+        [delta_x, delta_y, delta_z]
+    """
+    quat = np.asarray(quat, dtype=float)
+    init_quat = np.asarray(init_quat, dtype=float)
+
+    if quat.shape != (4,) or init_quat.shape != (4,):
+        raise ValueError("四元数必须为长度为 4 的数组：[w, x, y, z]")
+
+    if np.linalg.norm(quat) < 1e-12:
+        raise ValueError("当前四元数的模不能为 0")
+
+    if np.linalg.norm(init_quat) < 1e-12:
+        raise ValueError("初始四元数的模不能为 0")
+
+    # 归一化
+    quat = quat / np.linalg.norm(quat)
+    init_quat = init_quat / np.linalg.norm(init_quat)
+
+    # scipy 的四元数顺序是 [x, y, z, w]
+    quat_xyzw = np.array([quat[1], quat[2], quat[3], quat[0]])
+    init_quat_xyzw = np.array([
+        init_quat[1],
+        init_quat[2],
+        init_quat[3],
+        init_quat[0],
+    ])
+
+    current_rotation = Rotation.from_quat(quat_xyzw)
+    initial_rotation = Rotation.from_quat(init_quat_xyzw)
+
+    # 当前姿态相对于初始姿态的相对旋转
+    relative_rotation = current_rotation * initial_rotation.inv()
+
+    # 转换为 XYZ 欧拉角
+    delta_xyz = relative_rotation.as_euler("xyz", degrees=degrees)
+
+    return delta_xyz

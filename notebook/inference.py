@@ -1,8 +1,14 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 import os
+import shutil
 
 # not ideal to put that here
-os.environ["CUDA_HOME"] = os.environ["CONDA_PREFIX"]
+cuda_home = os.environ.get("CUDA_HOME")
+if not cuda_home or not shutil.which("nvcc", path=os.path.join(cuda_home, "bin")):
+    for candidate in ("/usr/local/cuda", os.environ.get("CONDA_PREFIX")):
+        if candidate and shutil.which("nvcc", path=os.path.join(candidate, "bin")):
+            os.environ["CUDA_HOME"] = candidate
+            break
 os.environ["LIDRA_SKIP_INIT"] = "true"
 
 import sys
@@ -14,7 +20,6 @@ from hydra.utils import instantiate, get_method
 import torch
 import math
 import utils3d
-import shutil
 import subprocess
 import seaborn as sns
 from PIL import Image
@@ -103,6 +108,7 @@ class Inference:
         image: Union[Image.Image, np.ndarray],
         mask: Optional[Union[None, Image.Image, np.ndarray]],
         seed: Optional[int] = None,
+        with_texture: bool = False,
         pointmap=None,
     ) -> dict:
         image = self.merge_mask_to_rgba(image, mask)
@@ -112,9 +118,9 @@ class Inference:
             seed,
             stage1_only=False,
             with_mesh_postprocess=False,
-            with_texture_baking=False,
+            with_texture_baking=with_texture,
             with_layout_postprocess=False,
-            use_vertex_color=True,
+            use_vertex_color = not with_texture,
             stage1_inference_steps=None,
             pointmap=pointmap,
         )

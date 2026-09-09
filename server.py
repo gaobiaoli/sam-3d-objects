@@ -129,6 +129,7 @@ def _delta_pose_to_json(delta_pose: dict) -> dict:
             "scale": np.asarray(delta_pose["scale"], dtype=np.float32).reshape(3).tolist(),
             "translation": np.asarray(delta_pose["translation"], dtype=np.float32).reshape(3).tolist(),
             "rotation": np.asarray(delta_pose["rotation_wxyz"], dtype=np.float32).reshape(4).tolist(),
+            "final_iou": float(delta_pose.get("final_iou", np.nan))
         }
     }
 
@@ -325,6 +326,7 @@ async def infer(
     iou_loss: bool = Form(True, description="If true, run pointmap+mask pose optimization"),
     optimize_num_iterations: int = Form(300, description="Pose optimizer iterations"),
     request_id: Optional[str] = Form(None),
+    with_texture: bool = False,
     seed: int = Form(42),
 ):
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -410,9 +412,9 @@ async def infer(
         try:
             if use_depth:
                 logger.info(f"Running inference with depth support, pointmap shape: {pointmap_tensor.shape if pointmap_tensor is not None else None}")
-                output = get_inference()(img_np, mask_np, seed=seed, pointmap=pointmap_tensor)
+                output = get_inference()(img_np, mask_np, seed=seed, pointmap=pointmap_tensor,with_texture=with_texture)
             else:
-                output = get_inference()(img_np, mask_np, seed=seed)
+                output = get_inference()(img_np, mask_np, seed=seed, with_texture=with_texture)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Inference error: {exc}")
 
