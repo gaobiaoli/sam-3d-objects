@@ -665,7 +665,7 @@ class delta_pose_optimizer:
         # 可选：仍然保留方向约束，防止优化早期跑反方向
         direction_loss = torch.relu(-delta_log_scale * (cur_depth - init_depth)) ** 2
 
-        return 0.01 * ratio_loss + 200 * direction_loss
+        return 1 * ratio_loss + 200 * direction_loss
 
     def bbox_scale_regularization_loss(self):
         if not self.optimize_scale:
@@ -738,7 +738,7 @@ class delta_pose_optimizer:
         return DEPTH_RESIDUAL_WEIGHT * robust.mean()
 
     def compute_loss(self, iou_loss_weight=0.0):
-        cd = self.trimmed_cd()
+        cd = self.one_sided_trimmed_cd()
         reg = self.regularization_loss()
         axis = self.main_axis_loss()
         depth_scale = self.depth_scale_constraint_loss()
@@ -912,7 +912,7 @@ def optimize_pose_from_loaded_mesh(
     trim_ratio=0.9,
     num_iterations=300,
     lr=0.01,
-    patience=60,
+    patience=300,
     save_refined_glb_path=None,
     save_delta_pose_path=None,
     base_transform=np.eye(4, dtype=np.float32),

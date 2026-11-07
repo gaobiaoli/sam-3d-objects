@@ -1,0 +1,14 @@
+Collecting git+https://github.com/facebookresearch/segment-anything.git
+  Cloning https://github.com/facebookresearch/segment-anything.git to /tmp/pip-req-build-yu0__hdy
+  Running command git clone --filter=blob:none --quiet https://github.com/facebookresearch/segment-anything.git /tmp/pip-req-build-yu0__hdy
+  Resolved https://github.com/facebookresearch/segment-anything.git to commit dca509fe793f601edb92606367a655c15ac00fdf
+  Preparing metadata (setup.py): started
+  Preparing metadata (setup.py): finished with status 'done'
+Building wheels for collected packages: segment_anything
+  Building wheel for segment_anything (setup.py): started
+  Building wheel for segment_anything (setup.py): finished with status 'done'
+  Created wheel for segment_anything: filename=segment_anything-1.0-py3-none-any.whl size=36600 sha256=a8834bca1885c1e14507b73ea01c11f122e5334a55f4c88b7424bac2dbd1af8c
+  Stored in directory: /tmp/pip-ephem-wheel-cache-c7qiafxi/wheels/15/d7/bd/05f5f23b7dcbe70cbc6783b06f12143b0cf1a5da5c7b52dcc5
+Successfully built segment_anything
+Installing collected packages: segment_anything
+Successfully installed segment_anything-1.0

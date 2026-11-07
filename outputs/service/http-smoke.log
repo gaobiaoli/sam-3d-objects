@@ -1,0 +1,13 @@
+HTTP docs and OpenAPI: OK
+Real SAM bbox segmentation: OK
+{
+  "base_url": "http://127.0.0.1:6006",
+  "http_status": 200,
+  "request": "bbox + RGB + depth + intrinsics",
+  "inference_seconds": 16.23,
+  "glb_bytes": 8129464,
+  "mesh_vertices": 203238,
+  "mesh_faces": 406390,
+  "sam_mask_pixels": 27380,
+  "result_downloads": "glb/json/mask all HTTP 200"
+}

@@ -30,7 +30,7 @@ import numpy as np
 import torch
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from utils import build_o3d_transform_from_p3d, load_pose_json, quat_wxyz_to_rotmat, transform2pose, pose2transform
 from loguru import logger
 import sys
@@ -554,10 +554,10 @@ async def infer_sam(
         iio.imwrite(mask_png_bytes, mask_uint8, extension=".png")
         mask_png_bytes.seek(0)
 
-        return FileResponse(
+        return Response(
             content=mask_png_bytes.getvalue(),
             media_type="image/png",
-            filename="mask.png",
+            headers={"Content-Disposition": 'attachment; filename="mask.png"'},
         )
 
 

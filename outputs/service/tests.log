@@ -1,0 +1,70 @@
+.                                                                        [100%]
+=============================== warnings summary ===============================
+../miniconda3/envs/sam3d/lib/python3.11/site-packages/starlette/testclient.py:45
+  /home/bgao491/miniconda3/envs/sam3d/lib/python3.11/site-packages/starlette/testclient.py:45: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+../miniconda3/envs/sam3d/lib/python3.11/site-packages/torch/cuda/__init__.py:61
+  /home/bgao491/miniconda3/envs/sam3d/lib/python3.11/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+    import pynvml  # type: ignore[import]
+
+../miniconda3/envs/sam3d/lib/python3.11/site-packages/ccimport/buildtools/writer.py:24
+  /home/bgao491/miniconda3/envs/sam3d/lib/python3.11/site-packages/ccimport/buildtools/writer.py:24: DeprecationWarning: Use setlocale(), getencoding() and getlocale() instead
+    _LOC = locale.getdefaultlocale()[0]
+
+../miniconda3/envs/sam3d/lib/python3.11/site-packages/lightning/fabric/__init__.py:41
+  /home/bgao491/miniconda3/envs/sam3d/lib/python3.11/site-packages/lightning/fabric/__init__.py:41: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+
+../miniconda3/envs/sam3d/lib/python3.11/site-packages/pkg_resources/__init__.py:3147
+  /home/bgao491/miniconda3/envs/sam3d/lib/python3.11/site-packages/pkg_resources/__init__.py:3147: DeprecationWarning: Deprecated call to `pkg_resources.declare_namespace('google')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+    declare_namespace(pkg)
+
+../miniconda3/envs/sam3d/lib/python3.11/site-packages/pkg_resources/__init__.py:3147
+  /home/bgao491/miniconda3/envs/sam3d/lib/python3.11/site-packages/pkg_resources/__init__.py:3147: DeprecationWarning: Deprecated call to `pkg_resources.declare_namespace('google.cloud')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+    declare_namespace(pkg)
+
+../miniconda3/envs/sam3d/lib/python3.11/site-packages/pkg_resources/__init__.py:2559
+  /home/bgao491/miniconda3/envs/sam3d/lib/python3.11/site-packages/pkg_resources/__init__.py:2559: DeprecationWarning: Deprecated call to `pkg_resources.declare_namespace('google')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+    declare_namespace(parent)
+
+../miniconda3/envs/sam3d/lib/python3.11/site-packages/lightning/fabric/__init__.py:41
+  /home/bgao491/miniconda3/envs/sam3d/lib/python3.11/site-packages/lightning/fabric/__init__.py:41: Deprecated call to `pkg_resources.declare_namespace('lightning.fabric')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+
+../miniconda3/envs/sam3d/lib/python3.11/site-packages/pkg_resources/__init__.py:2559
+../miniconda3/envs/sam3d/lib/python3.11/site-packages/pkg_resources/__init__.py:2559
+  /home/bgao491/miniconda3/envs/sam3d/lib/python3.11/site-packages/pkg_resources/__init__.py:2559: DeprecationWarning: Deprecated call to `pkg_resources.declare_namespace('lightning')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+    declare_namespace(parent)
+
+../miniconda3/envs/sam3d/lib/python3.11/site-packages/lightning/pytorch/__init__.py:37
+  /home/bgao491/miniconda3/envs/sam3d/lib/python3.11/site-packages/lightning/pytorch/__init__.py:37: Deprecated call to `pkg_resources.declare_namespace('lightning.pytorch')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+
+<string>:12
+<string>:12
+  <string>:12: DeprecationWarning: normalize_pointmap is also set to False, which means we will return the moments but not normalize the pointmap. This supports old unnormalized pointmap models, but this is dangerous behavior.
+
+server.py:300
+  /home/bgao491/MySAM3d/server.py:300: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+../miniconda3/envs/sam3d/lib/python3.11/site-packages/fastapi/applications.py:4723
+  /home/bgao491/miniconda3/envs/sam3d/lib/python3.11/site-packages/fastapi/applications.py:4723: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)  # ty: ignore[deprecated]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 15 warnings in 13.17s
