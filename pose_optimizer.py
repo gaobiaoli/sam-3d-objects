@@ -7,6 +7,7 @@ import torch
 import trimesh
 import open3d as o3d
 from pytorch3d.structures import Meshes
+from pytorch3d.ops import knn_points
 from pytorch3d.renderer import (
     PerspectiveCameras,
     RasterizationSettings,
@@ -112,30 +113,38 @@ def _build_depth_rasterizer(depth_np, mask_np, device, intrinsics=None):
             raw_w,
         )
 
+    valid_np = np.isfinite(depth_np) & (depth_np > DEPTH_RESIDUAL_MIN_DEPTH)
+    if mask_np is not None:
+        valid_np = valid_np & (mask_np > 0)
+    # 提速（结果不变）：只光栅化有效像素的包围框。框外像素 valid 恒为 False，本来就不进入 loss；
+    # 主点平移 (x0, y0) 后框内每个像素的深度与全图渲染相同，有效像素的行优先顺序也相同，随机子采样不变。
+    y0, y1, x0, x1 = 0, raw_h, 0, raw_w
+    if valid_np.any():
+        ys, xs = np.nonzero(valid_np)
+        y0, y1, x0, x1 = int(ys.min()), int(ys.max()) + 1, int(xs.min()), int(xs.max()) + 1
+    h, w = y1 - y0, x1 - x0
+
     cameras = PerspectiveCameras(
         focal_length=torch.tensor(
             [[intrinsics[0, 0], intrinsics[1, 1]]], device=device, dtype=torch.float32
         ),
         principal_point=torch.tensor(
-            [[intrinsics[0, 2], intrinsics[1, 2]]], device=device, dtype=torch.float32
+            [[float(intrinsics[0, 2]) - x0, float(intrinsics[1, 2]) - y0]], device=device, dtype=torch.float32
         ),
-        image_size=torch.tensor([[raw_h, raw_w]], device=device, dtype=torch.float32),
+        image_size=torch.tensor([[h, w]], device=device, dtype=torch.float32),
         in_ndc=False,
         device=device,
     )
     raster_settings = RasterizationSettings(
-        image_size=(raw_h, raw_w),
+        image_size=(h, w),
         blur_radius=0.0,
         faces_per_pixel=1,
         max_faces_per_bin=200000,
         bin_size=0,
     )
     rasterizer = MeshRasterizer(cameras=cameras, raster_settings=raster_settings)
-    depth_t = torch.tensor(depth_np, dtype=torch.float32, device=device)
-    valid_np = np.isfinite(depth_np) & (depth_np > DEPTH_RESIDUAL_MIN_DEPTH)
-    if mask_np is not None:
-        valid_np = valid_np & (mask_np > 0)
-    valid_t = torch.tensor(valid_np, dtype=torch.bool, device=device)
+    depth_t = torch.tensor(np.ascontiguousarray(depth_np[y0:y1, x0:x1]), dtype=torch.float32, device=device)
+    valid_t = torch.tensor(np.ascontiguousarray(valid_np[y0:y1, x0:x1]), dtype=torch.bool, device=device)
     return rasterizer, depth_t, valid_t
 
 
@@ -177,6 +186,14 @@ def _simplify_mesh(mesh, target_triangles=3000):
     else:
         mesh_o3d = copy.deepcopy(mesh)
     mesh_o3d = copy.deepcopy(mesh_o3d)
+    # 提速（近似）：面数远多于目标时，先用顶点聚类粗简化到约 SIMPLIFY_PREFILTER_FACES 面，再做原来的清理和二次误差简化。
+    # 二次误差简化的耗时随输入面数增长，SAM3D 输出常有 30–130 万面。
+    if SIMPLIFY_PREFILTER_FACES and len(mesh_o3d.triangles) > 2 * SIMPLIFY_PREFILTER_FACES:
+        mesh_o3d.remove_duplicated_vertices()
+        voxel = float(np.sqrt(mesh_o3d.get_surface_area() / (SIMPLIFY_PREFILTER_FACES / 2.0)))  # 每个体素约 2 个三角形
+        mesh_o3d = mesh_o3d.simplify_vertex_clustering(
+            voxel_size=voxel, contraction=o3d.geometry.SimplificationContraction.Quadric
+        )
     mesh_o3d.remove_duplicated_vertices()
     mesh_o3d.remove_degenerate_triangles()
     mesh_o3d.remove_duplicated_triangles()
@@ -553,15 +570,9 @@ class delta_pose_optimizer:
         src = self.transform_source()
         # src = self._visible_source_points(src)
         self.new_source = src
-        all_min_dists = []
-
-        for i in range(0, len(self.target), batch_size):
-            tgt_batch = self.target[i:i + batch_size]
-            d = torch.cdist(tgt_batch, src)
-            min_d, _ = torch.min(d, dim=1)
-            all_min_dists.append(min_d)
-
-        min_dists = torch.cat(all_min_dists, dim=0)
+        # 提速：KNN 直接求最近点，替代稠密 cdist（结果相同，梯度相同）
+        sq_dists = knn_points(self.target[None], src[None], K=1).dists[0, :, 0]
+        min_dists = torch.sqrt(torch.clamp(sq_dists, min=1e-12))
 
         if 0 < self.trim_ratio < 1.0 and len(min_dists) > 10:
             k = max(1, int(len(min_dists) * self.trim_ratio))
@@ -619,8 +630,10 @@ class delta_pose_optimizer:
             return torch.tensor(0.0, dtype=torch.float32, device=self.device)
         rot = quaternion_to_matrix_torch(self.quat)
         rot_world = self.K[:3, :3] @ rot
-        z_world = torch.tensor([0.0, 0.0, 1.0], device=rot_world.device, dtype=rot_world.dtype)
-        dots = rot_world.t() @ z_world                       # (3,)
+        # 提速：常量只建一次，避免每次迭代 CPU->GPU 拷贝
+        if getattr(self, "_z_world", None) is None:
+            self._z_world = torch.tensor([0.0, 0.0, 1.0], device=rot_world.device, dtype=rot_world.dtype)
+        dots = rot_world.t() @ self._z_world                 # (3,)
 
         # 只关心“平行”，不区分 +z / -z
         loss = 1.0 - torch.max(dots ** 2)
@@ -650,10 +663,9 @@ class delta_pose_optimizer:
         if not self.optimize_scale:
             return torch.tensor(0.0, dtype=torch.float32, device=self.device)
 
-        eps = torch.tensor(1e-6, dtype=torch.float32, device=self.device)
-
-        init_depth = torch.clamp(self.init_trans[2], min=eps)
-        cur_depth = torch.clamp(self.trans[2], min=eps)
+        # 提速：用 Python 浮点作下限，不再每次迭代新建 GPU 张量（数值相同）
+        init_depth = torch.clamp(self.init_trans[2], min=1e-6)
+        cur_depth = torch.clamp(self.trans[2], min=1e-6)
 
         depth_ratio = cur_depth / init_depth
         target_delta_log_scale = torch.log(depth_ratio)
@@ -674,8 +686,11 @@ class delta_pose_optimizer:
         return 0.02 * torch.sum((self.log_scale - self.desired_log_scale) ** 2)
 
     def scale_range_loss(self):
-        if not self.optimize_scale:
-            return torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        # 提速：权重为 0 时该项恒为 0（且本就不计入总 loss），不再每次迭代新建张量
+        if not self.optimize_scale or self.scale_range_weight == 0:
+            if getattr(self, "_zero", None) is None:
+                self._zero = torch.zeros((), dtype=torch.float32, device=self.device)
+            return self._zero
 
         delta = self.log_scale - self.init_log_scale
         lo = torch.log(torch.tensor(self.scale_range_min_ratio, dtype=torch.float32, device=self.device))
@@ -780,8 +795,13 @@ class delta_pose_optimizer:
         # unlock_iter = 0
 
         history = {"loss": [], "cd": [], "scale": []}
+        gpu_history, gpu_scale, gpu_params = [], [], []
 
-        for it in range(num_iterations):
+        # 提前停止：某阶段内当前位姿与前 EARLY_STOP_WINDOW 步每一步的差都小于阈值，视为收敛。
+        # 阶段一收敛 -> 跳到解锁（学习率按原计划补齐）；阶段二收敛 -> 结束。
+        it, stage_start, last_iou = 0, 0, None
+        self.stop_info = {"stage1_converged_at": None, "stage2_converged_at": None}
+        while it < num_iterations:
             if it == unlock_iter:
                 for group in optimizer.param_groups:
                     if group.get("name") == "quat":
@@ -801,24 +821,11 @@ class delta_pose_optimizer:
             with torch.no_grad():
                 self.quat[:] = self.quat / (torch.norm(self.quat) + 1e-12)
 
-            scale_np = torch.exp(self.log_scale).detach().cpu().numpy()
-            if np.ndim(scale_np) == 0:
-                scale_history = float(scale_np)
-                scale_text = f"{scale_history:.5f}"
-            else:
-                scale_history = scale_np.astype(float).tolist()
-                scale_text = "[" + ", ".join(f"{v:.5f}" for v in scale_history) + "]"
-            cd_val = float(cd.detach().cpu().item())
-            axis_val = float(axis.detach().cpu().item())
-            depth_scale_val = float(depth_scale.detach().cpu().item())
-            bbox_scale_val = float(bbox_scale.detach().cpu().item())
-            scale_range_val = float(scale_range.detach().cpu().item())
-            depth_residual_val = float(depth_residual.detach().cpu().item())
-            loss_val = float(loss.detach().cpu().item())
-
-            history["loss"].append(loss_val)
-            history["cd"].append(cd_val)
-            history["scale"].append(scale_history)
+            # 提速：历史值先留在 GPU 上，循环结束后一次性取回；只在打印的迭代同步
+            gpu_history.append(torch.stack([loss.detach(), cd.detach()]))
+            gpu_scale.append(torch.exp(self.log_scale).detach().clone())
+            # 记录每步位姿参数（用于设计提前停止），不同步
+            gpu_params.append(torch.cat([self.quat.detach(), self.trans.detach(), self.log_scale.detach().reshape(-1)]))
 
             iou_val = None
             if iou_score is not None and render_iou_every is not None:
@@ -826,6 +833,17 @@ class delta_pose_optimizer:
                     iou_val = float(iou_score.detach().cpu().item())
 
             if (it + 1) % 20 == 0:
+                scale_np = torch.exp(self.log_scale).detach().cpu().numpy()
+                if np.ndim(scale_np) == 0:
+                    scale_text = f"{float(scale_np):.5f}"
+                else:
+                    scale_text = "[" + ", ".join(f"{v:.5f}" for v in scale_np.astype(float).tolist()) + "]"
+                loss_val, cd_val = [float(x) for x in gpu_history[-1].cpu()]
+                axis_val = float(axis.detach().cpu().item())
+                depth_scale_val = float(depth_scale.detach().cpu().item())
+                bbox_scale_val = float(bbox_scale.detach().cpu().item())
+                scale_range_val = float(scale_range.detach().cpu().item())
+                depth_residual_val = float(depth_residual.detach().cpu().item())
                 msg = (
                     f"iter {it + 1:04d} | "
                     f"loss={loss_val:.6f} | cd={cd_val:.6f} | axis={axis_val:.6f} | "
@@ -838,7 +856,33 @@ class delta_pose_optimizer:
                 if iou_loss is not None:
                     msg += f" | iou_loss={iou_loss.item():.6f} | iou_w={iou_weight:.4f}"
                 print(msg)
-        self.final_iou = iou_val
+            if iou_val is not None:
+                last_iou = iou_val
+
+            if EARLY_STOP and it + 1 - stage_start > EARLY_STOP_WINDOW and it != unlock_iter - 1:
+                if _pose_window_converged(torch.stack(gpu_params[-(EARLY_STOP_WINDOW + 1):])):
+                    if it < unlock_iter:
+                        print(f"stage 1 converged at iter {it + 1}, skip to iter {unlock_iter + 1}")
+                        self.stop_info["stage1_converged_at"] = it + 1
+                        for _ in range(unlock_iter - 1 - it):
+                            scheduler.step()
+                        it = stage_start = unlock_iter
+                        continue
+                    print(f"stage 2 converged at iter {it + 1}, stop")
+                    self.stop_info["stage2_converged_at"] = it + 1
+                    break
+            if it + 1 == unlock_iter:
+                stage_start = unlock_iter
+            it += 1
+        self.final_iou = last_iou
+        if gpu_history:
+            values = torch.stack(gpu_history).cpu().numpy().astype(float)
+            history["loss"] = values[:, 0].tolist()
+            history["cd"] = values[:, 1].tolist()
+            scales = torch.stack(gpu_scale).cpu().numpy().astype(float)
+            history["scale"] = [float(s) if np.ndim(s) == 0 else s.tolist() for s in scales]
+            history["params"] = torch.stack(gpu_params).cpu().numpy().astype(float)
+        history["stop_info"] = self.stop_info
         return history
 
     def get_delta_pose(self):
@@ -986,6 +1030,15 @@ def optimize_pose_from_loaded_mesh(
         scale_range_weight=scale_range_weight,
     )
 
+    # 提速：深度渲染与 IoU 渲染共用同一份简化 mesh（原来同一输入简化两次）
+    p3d_cache = {}
+
+    def _shared_p3d_mesh(dev):
+        key = str(dev)
+        if key not in p3d_cache:
+            p3d_cache[key] = _build_p3d_mesh(glb_mesh, dev)
+        return p3d_cache[key]
+
     render_depth_loss_fn = None
     if DEPTH_RESIDUAL_LOSS:
         depth_np = np.asarray(point_map, dtype=np.float32)
@@ -998,7 +1051,7 @@ def optimize_pose_from_loaded_mesh(
             depth_device,
             intrinsics,
         )
-        depth_verts, depth_faces, _ = _build_p3d_mesh(glb_mesh, depth_device)
+        depth_verts, depth_faces, _ = _shared_p3d_mesh(depth_device)
 
         def _depth_loss_fn(quat, trans, log_scale):
             return _render_depth_residual_loss(
@@ -1025,7 +1078,7 @@ def optimize_pose_from_loaded_mesh(
             else optimizer.device
         )
         renderer, mask_t = _build_mask_renderer(mask, iou_device, intrinsics)
-        verts, faces, textures = _build_p3d_mesh(glb_mesh, iou_device)
+        verts, faces, textures = _shared_p3d_mesh(iou_device)
 
         def _iou_loss_fn(quat, trans, log_scale):
             return _render_soft_iou_loss(
@@ -1086,6 +1139,25 @@ DEPTH_RESIDUAL_EPS = 0.01
 DEPTH_RESIDUAL_MIN_DEPTH = 1e-6
 DEPTH_RESIDUAL_MIN_POINTS = 256
 DEPTH_RESIDUAL_MAX_POINTS = 12000
+
+EARLY_STOP = True
+
+SIMPLIFY_PREFILTER_FACES = 100000  # 0 表示关闭预简化（与原做法相同）
+EARLY_STOP_WINDOW = 20  # 在 20 个设计样本上按事先标准选定（见 PoseLossTrace/es_design.py）
+EARLY_STOP_TOL = (0.002, 0.2, 1e-3)  # (平移 m, 旋转 deg, |Δlog s|)
+
+
+def _pose_window_converged(window):
+    """window: (W+1, 8)，最后一行为当前位姿 (quat wxyz, trans, log_scale)。在 GPU 上算，只取回一个布尔值。"""
+    cur, prev = window[-1], window[:-1]
+    dt = torch.linalg.norm(prev[:, 4:7] - cur[4:7], dim=1).max()
+    qa = prev[:, :4] / torch.linalg.norm(prev[:, :4], dim=1, keepdim=True)
+    qb = cur[:4] / torch.linalg.norm(cur[:4])
+    chord = torch.minimum(torch.linalg.norm(qa - qb, dim=1), torch.linalg.norm(qa + qb, dim=1))
+    dr = torch.rad2deg(4 * torch.asin(torch.clamp(chord / 2, max=1.0))).max()  # 小角度下比 acos 稳定
+    ds = (prev[:, 7:] - cur[7:]).abs().max()
+    tol_t, tol_r, tol_s = EARLY_STOP_TOL
+    return bool(((dt <= tol_t) & (dr <= tol_r) & (ds <= tol_s)).item())
 
 
 if __name__ == "__main__":
