@@ -14,6 +14,12 @@ Return mode:
 Depth support:
 - `depth_image` as depth image (`.png/.jpg/.jpeg/.tiff`)
 - optional `K` (3x3 intrinsics JSON string)
+
+BIM prior support (instead of `depth_image`, requires `K`):
+- `bim_prior` as `.npy` (HxW BIM depth in metres, 0/NaN = no hit) or `.npz` with `depth` and optional
+  `normal` (3xHxW or HxWx3, camera frame), rendered with the same K as the image.
+- MoGe depth is rescaled by the BIM adapter (bim_prior_adapter.py); the result is used as the pointmap
+  for SAM3D and, with `optimize_pose`, as the optimisation target.
 """
 
 import json
@@ -82,6 +88,7 @@ app = FastAPI(title="SAM 3D Objects Inference API")
 
 inference_instance: Optional[Any] = None
 sam_model: Optional[Any] = None
+bim_adapter_model: Optional[Any] = None
 
 
 def _output_dir() -> Path:
@@ -214,7 +221,12 @@ def _depth_to_pointmap(
         depth[depth == float(invalid_depth_value)] = 0.0
 
     depth = depth / float(depth_scale)
-    depth[depth <= 0] = np.nan
+    return _depth_array_to_pointmap(depth, k_matrix)
+
+
+def _depth_array_to_pointmap(depth: np.ndarray, k_matrix: np.ndarray) -> torch.Tensor:
+    depth = np.array(depth, dtype=np.float32)
+    depth[~(depth > 0)] = np.nan
 
     h, w = depth.shape
     fx, fy = k_matrix[0, 0], k_matrix[1, 1]
@@ -230,6 +242,33 @@ def _depth_to_pointmap(
 
     pointmap = np.stack([-x, -y, z], axis=-1).astype(np.float32)
     return torch.from_numpy(pointmap)
+
+def _load_bim_prior(data: bytes, filename: str) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    try:
+        if filename.endswith(".npz"):
+            with np.load(BytesIO(data)) as values:
+                return values["depth"], (values["normal"] if "normal" in values.files else None)
+        if filename.endswith(".npy"):
+            return np.load(BytesIO(data)), None
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid bim_prior: {exc}")
+    raise HTTPException(status_code=400, detail="bim_prior must be .npy (depth) or .npz (depth, optional normal)")
+
+
+def _bim_corrected_depth(img_np: np.ndarray, k_matrix: np.ndarray, bim_depth: np.ndarray,
+                         bim_normal: Optional[np.ndarray]) -> tuple[np.ndarray, dict]:
+    global bim_adapter_model
+    import bim_prior_adapter
+
+    if bim_adapter_model is None:
+        weights = os.environ.get("BIM_ADAPTER_WEIGHTS", str(bim_prior_adapter.DEFAULT_WEIGHTS))
+        bim_adapter_model = bim_prior_adapter.load_adapter(weights, "cuda" if torch.cuda.is_available() else "cpu")
+    moge = get_inference()._pipeline.depth_model.model  # SAM3D's own MoGe-1, reused
+    try:
+        return bim_prior_adapter.bim_corrected_depth(moge, bim_adapter_model, img_np, k_matrix, bim_depth, bim_normal)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid bim_prior: {exc}")
+
 
 def process_pointmap_for_optimization(pointmap: torch.Tensor) -> np.ndarray:
     pointmap_np = pointmap.detach().cpu().numpy()
@@ -317,6 +356,7 @@ async def infer(
     return_mask: bool = Form(False, description="If true and using bbox, return generated mask info"),
     just_return_mask: bool = Form(False, description="If true, only return the generated mask from bbox without running inference"),
     depth_image: Optional[UploadFile] = File(None, description="Optional depth image file"),
+    bim_prior: Optional[UploadFile] = File(None, description="Optional BIM depth (.npy, or .npz with depth/normal) rendered with K; uses the BIM adapter"),
     K: Optional[str] = Form(None, description="Optional 3x3 intrinsics JSON string"),
     Rt: Optional[str] = Form(None, description="Optional 4x4 camera pose Rt matrix as JSON string"),
     use_depth: bool = Form(False, description="If true, use depth image and K for pointmap generation"),
@@ -387,7 +427,19 @@ async def infer(
             return response_payload
 
         pointmap_tensor = None
-        if depth_image is not None:
+        k_matrix = None
+        bim_info = None
+        if bim_prior is not None:
+            if depth_image is not None:
+                raise HTTPException(status_code=400, detail="Provide either `depth_image` or `bim_prior`, not both")
+            k_matrix = _parse_k_matrix(K)
+            if k_matrix is None:
+                raise HTTPException(status_code=400, detail="bim_prior requires `K`")
+            bim_depth, bim_normal = _load_bim_prior(await bim_prior.read(), (bim_prior.filename or "").lower())
+            corrected_depth, bim_info = _bim_corrected_depth(img_np, k_matrix, bim_depth, bim_normal)
+            pointmap_tensor = _depth_array_to_pointmap(corrected_depth, k_matrix)
+            use_depth = True
+        elif depth_image is not None:
             depth_bytes = await depth_image.read()
             suffix = Path(depth_image.filename or "").suffix.lower()
             valid_depth_suffixes = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
@@ -432,7 +484,7 @@ async def infer(
             if pointmap_tensor is None:
                 raise HTTPException(
                     status_code=400,
-                    detail="optimize_pose=true requires `depth_image` and valid `K`",
+                    detail="optimize_pose=true requires `depth_image` or `bim_prior`, and valid `K`",
                 )
             if mask_np is None:
                 raise HTTPException(
@@ -490,6 +542,8 @@ async def infer(
             "pose": pose_result,
             "glb_b64": glb_b64,
         }
+        if bim_info is not None:
+            response_payload["bim_adapter"] = bim_info
 
         if optimize_pose:
             response_payload["pose_optimized"] = pose_result_optimized
